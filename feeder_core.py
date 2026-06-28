@@ -146,3 +146,39 @@ def mirror_to_supabase(snap: dict | None = None) -> bool:
         return True
     except Exception:
         return False
+
+
+def _sb(method: str, path: str, body=None, extra_headers=None):
+    """Minimal Supabase REST call returning parsed JSON (or None). Raises on transport error."""
+    import urllib.request
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+               "Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{SUPABASE_URL}/rest/v1/{path}", data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else None
+
+
+def fetch_pending_commands() -> list:
+    """Pending feeder_commands rows (oldest first). Empty list without a key or on error."""
+    if not SUPABASE_KEY:
+        return []
+    try:
+        return _sb("GET", "feeder_commands?status=eq.pending&order=created_at.asc&select=*") or []
+    except Exception:
+        return []
+
+
+def mark_command(cmd_id: str, status: str, result: str = "") -> None:
+    """Mark a command row done/failed with the result + execution time."""
+    if not SUPABASE_KEY:
+        return
+    body = {"status": status, "result": result[:500],
+            "executed_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
+    try:
+        _sb("PATCH", f"feeder_commands?id=eq.{cmd_id}", body)
+    except Exception:
+        pass
