@@ -6,7 +6,9 @@ schema only exposes the camera; the cloud rejects the feed command it schema-val
 command (dp 3 = portions) and all feeder state live on the local channel only.
 
 Confirmed datapoint map (tinytuya.Device(..., version=3.4)):
-  * dp 3   (write) — manual feed, integer = portions. Write-only, no echo; verify via dp 247.
+  * dp 232 (write) — manual feed, integer = portions. The device ACKs it (echoes 233='feeding')
+                     and resets it to 0 between feeds, so repeat same-count feeds work (no dedupe).
+                     Cycle takes ~25s; the feed log (247) updates when it completes.
   * dp 247 (read)  — last-feed log JSON {"value": portions, "time": epoch}
   * dp 233 (read)  — motor state: "standby" / "feeding"
   * dp 241 (read)  — food bin level (e.g. "full")
@@ -31,7 +33,7 @@ VERSION = float(os.environ.get("FEEDER_VERSION", "3.4"))
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://<project-ref>.supabase.co").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-DP_FEED = "3"
+DP_FEED = "232"
 DP_LAST_FEED = "247"
 DP_MOTOR = "233"
 DP_FOOD = "241"
@@ -86,16 +88,33 @@ def decode_schedule(dps: dict) -> list:
 
 
 def feed(portions: int = 1) -> dict:
-    """Dispense `portions` now. Returns {ok, portions, confirmed, fed_at}. Verifies via the feed log."""
-    before = parse_last_feed(read_dps()).get("time", 0)
-    device().set_value(DP_FEED, portions)  # write-only, no echo
-    for _ in range(6):
-        time.sleep(1.5)
-        log = parse_last_feed(read_dps())
-        if log.get("time", 0) > before:
-            return {"ok": True, "confirmed": True, "portions": log.get("value", portions),
-                    "fed_at": log.get("time")}
-    return {"ok": True, "confirmed": False, "portions": portions, "fed_at": None}
+    """Dispense `portions` now. Returns {ok, portions, confirmed, fed_at}.
+
+    Writes dp 232 (the device ACKs with 233='feeding'). The mechanical cycle takes ~25s and the
+    feed log (247) updates on completion, so we hold one persistent connection and poll up to ~36s,
+    returning as soon as the log advances. If the motor engaged but the log hasn't posted by then,
+    we still report confirmed (the feed is in progress)."""
+    d = device()
+    d.set_socketPersistent(True)
+    try:
+        before = parse_last_feed((d.status() or {}).get("dps", {})).get("time", 0)
+        resp = d.set_value(DP_FEED, portions)
+        started = isinstance(resp, dict) and (resp.get("dps") or {}).get(DP_MOTOR) == "feeding"
+        for _ in range(24):
+            time.sleep(1.5)
+            dps = (d.status() or {}).get("dps", {})
+            if dps.get(DP_MOTOR) == "feeding":
+                started = True
+            log = parse_last_feed(dps)
+            if log.get("time", 0) > before:
+                return {"ok": True, "confirmed": True, "portions": log.get("value", portions),
+                        "fed_at": log.get("time")}
+        return {"ok": True, "confirmed": bool(started), "portions": portions, "fed_at": None}
+    finally:
+        try:
+            d.close()
+        except Exception:
+            pass
 
 
 def snapshot() -> dict:
