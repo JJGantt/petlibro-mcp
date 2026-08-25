@@ -46,7 +46,54 @@ _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 def device() -> tinytuya.Device:
     d = tinytuya.Device(DEVICE_ID, FEEDER_IP, LOCAL_KEY, version=VERSION)
     d.set_socketTimeout(6)
+    # tinytuya defaults to 5 internal retries at 5s apart, so a dead address costs ~55s per status()
+    # call — that is what made a stale IP hang a voice command for ~52s instead of failing and
+    # rediscovering. read_dps() already retries at the application level, so one attempt here is
+    # enough: fail fast, then rediscover.
+    d.set_socketRetryLimit(1)
+    d.set_socketRetryDelay(1)
     return d
+
+
+_ENV_PATH = Path(__file__).parent / ".env-petlibro"
+SCAN_TIMEOUT_S = 8       # UDP discovery window — the feeder re-broadcasts every few seconds
+SCAN_COOLDOWN_S = 120    # don't rescan on every call while the feeder is genuinely offline/unplugged
+_last_scan = 0.0
+
+
+def _persist_ip(ip: str) -> None:
+    """Write the new address back to .env-petlibro so the NEXT process starts correct instead of
+    rediscovering all over again. Rewrites just the FEEDER_IP line, leaving the rest byte-identical."""
+    try:
+        lines = _ENV_PATH.read_text().splitlines(keepends=True)
+        out = [(f"FEEDER_IP={ip}\n" if ln.startswith("FEEDER_IP=") else ln) for ln in lines]
+        _ENV_PATH.write_text("".join(out))
+    except OSError:
+        pass   # can't persist (read-only fs / perms) — the in-process value below still works
+
+
+def rediscover() -> str | None:
+    """Find the feeder again after DHCP moves it, and adopt the new address.
+
+    Observed live: the lease shifted .116 -> .117 and every LAN call failed silently for days, while
+    the PetLibro app kept working — the app goes via Tuya's cloud, we deliberately don't (the cloud
+    schema-validates and won't feed). The device broadcasts itself over UDP, so match on the device id
+    we already hold. Rate-limited: a genuinely offline feeder must not add a scan to every call."""
+    global FEEDER_IP, _last_scan
+    now = time.monotonic()
+    if now - _last_scan < SCAN_COOLDOWN_S:
+        return None
+    _last_scan = now
+    try:
+        found = tinytuya.deviceScan(False, SCAN_TIMEOUT_S) or {}
+    except Exception:  # noqa: BLE001 — discovery is best-effort; never raise into a tool call
+        return None
+    for ip, info in found.items():
+        if (info.get("gwId") or info.get("id")) == DEVICE_ID and ip != FEEDER_IP:
+            FEEDER_IP = ip
+            _persist_ip(ip)
+            return ip
+    return None
 
 
 def read_dps() -> dict:
@@ -56,6 +103,10 @@ def read_dps() -> dict:
         if isinstance(data, dict) and data.get("dps"):
             return data["dps"]
         time.sleep(1)
+    if rediscover():          # both attempts failed — the address may have moved
+        data = device().status()
+        if isinstance(data, dict) and data.get("dps"):
+            return data["dps"]
     return {}
 
 
@@ -96,6 +147,9 @@ def feed(portions: int = 1) -> dict:
     we still report confirmed (the feed is in progress)."""
     d = device()
     d.set_socketPersistent(True)
+    if not (d.status() or {}).get("dps") and rediscover():
+        d = device()          # address moved — reconnect before writing the feed datapoint
+        d.set_socketPersistent(True)
     try:
         before = parse_last_feed((d.status() or {}).get("dps", {})).get("time", 0)
         resp = d.set_value(DP_FEED, portions)
