@@ -1,0 +1,38 @@
+# Working in petlibro-mcp
+
+## The cloud cannot feed — everything is LAN-only, on purpose
+
+Tuya's cloud schema for this device exposes the camera and **rejects the feed command**; the feed
+datapoint and all feeder state exist only on the local channel. So control is tinytuya straight to
+the feeder over the LAN, with the device id + local key.
+
+The consequence to keep in mind: whatever runs this has to be on the feeder's network. The Fly hub
+cannot be, which is why "Feed Now" on the phone writes a `feeder_commands` row and the Pi's
+`collector.py` dispenses. Nothing here should try to reach the feeder from off-LAN.
+
+It also means the PetLibro app working is not evidence that this does — the app goes via the cloud.
+
+## `dp 232` is the feed write, not `dp 3`
+
+The confirmed map is in `feeder_core.py`'s header and that file is the authority: 232 write =
+portions, 247 = last-feed log, 233 = motor state, 241 = food level, 231 = schedule (5 bytes per
+entry: day mask, hour, minute, portions, enabled). A feed cycle takes ~25s; 247 only updates when it
+completes, so an immediate re-read looks like nothing happened.
+
+## DHCP moves the feeder, and it fails silently
+
+A lease shift once broke every LAN call for days with no error anywhere. `rediscover()` UDP-scans for
+the device id and writes the new address back into `.env-petlibro` so the next process starts
+correct. It is rate-limited by `SCAN_COOLDOWN_S` deliberately — an unplugged feeder must not add a
+scan to every call. Keep both properties if you touch it.
+
+Because of that write-back, `.env-petlibro` is state, not just config. It is gitignored and holds the
+device id, local key and Supabase service key.
+
+## The collector is realtime-driven
+
+`collector.py` wakes on a Supabase realtime INSERT on `feeder_commands`; its poll is only a
+missed-event backstop. The old 5s poll cost ~17k empty reads a day against the free-plan egress
+quota, for worse latency. If a tap feels slow, fix the subscription rather than shortening the poll.
+
+It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit.
