@@ -36,3 +36,12 @@ missed-event backstop. The old 5s poll cost ~17k empty reads a day against the f
 quota, for worse latency. If a tap feels slow, fix the subscription rather than shortening the poll.
 
 It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit.
+
+## A rejected local key cannot be refreshed from here right now
+
+When status() returns `914 Check device key or version` (or `904 Unexpected Payload` under 3.3), the
+feeder has most likely re-provisioned and rotated its local key. The `TUYA_API_*` credentials in
+`.env-petlibro` would fetch the new one from `/v1.0/devices/<id>`, but that call returns
+`28841002 IoT Core service subscription has expired` until the Tuya IoT Platform trial is renewed
+(free, from the Tuya developer console). Without that, the new key has to come from re-pairing or
+another key-extraction route; nothing on the Pi can recover it.
