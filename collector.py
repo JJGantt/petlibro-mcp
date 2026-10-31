@@ -13,6 +13,7 @@ Two jobs in one loop:
 
 import asyncio
 import json
+import logging
 import threading
 import time
 
