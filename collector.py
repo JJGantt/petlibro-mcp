@@ -100,6 +100,11 @@ def main():
     # Errors and the heartbeat go to the ops responder (health/responder); the beat is from this loop,
     # which comes round at least every POLL_BACKSTOP_S, so a wedged loop goes quiet.
     ops.install(machine="pi", service="petlibro-collector")
+    # The realtime lib logs every socket drop (e.g. 1006 from Supabase) at ERROR and then reconnects
+    # on its own (auto_reconnect=True); a dropped socket that recovers is not a fault, and while it is
+    # down the main loop polls at POLL_DEGRADED_S. Reconnect failures still surface as other records.
+    logging.getLogger("realtime._async.client").addFilter(
+        lambda r: not r.getMessage().startswith("WebSocket connection closed with code"))
     threading.Thread(target=_rt_thread, daemon=True).start()
     last_mirror = 0.0   # monotonic epoch start → forces the startup mirror
     while True:
