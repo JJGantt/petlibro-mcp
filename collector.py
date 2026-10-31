@@ -17,6 +17,7 @@ import threading
 import time
 
 import feeder_core as fc
+import ops_report as ops
 
 POLL_BACKSTOP_S = 60   # realtime subscribed — poll is just a missed-event safety net
 POLL_DEGRADED_S = 5    # realtime down — polling is the pickup path, keep the old prompt cadence
@@ -85,13 +86,19 @@ def process_commands() -> bool:
             status = "done" if res.get("confirmed") else "failed"
             fc.mark_command(c["id"], status, json.dumps(res))
             print(f"[collector] fed {portions} via command {c['id']} -> {status}", flush=True)
+            if status == "failed":
+                ops.report(f"feed not confirmed by the feeder: {json.dumps(res)[:300]}")
         except Exception as e:  # noqa: BLE001
             fc.mark_command(c["id"], "failed", str(e))
             print(f"[collector] feed command {c['id']} error: {e}", flush=True)
+            ops.report(e)
     return True
 
 
 def main():
+    # Errors and the heartbeat go to the ops responder (health/responder); the beat is from this loop,
+    # which comes round at least every POLL_BACKSTOP_S, so a wedged loop goes quiet.
+    ops.install(machine="pi", service="petlibro-collector")
     threading.Thread(target=_rt_thread, daemon=True).start()
     last_mirror = 0.0   # monotonic epoch start → forces the startup mirror
     while True:
@@ -102,6 +109,8 @@ def main():
                 last_mirror = time.monotonic()
         except Exception as e:  # noqa: BLE001 — never let the loop die
             print(f"[collector] error: {e}", flush=True)
+            ops.report(e)
+        ops.beat(POLL_BACKSTOP_S)
         _wake.wait(POLL_BACKSTOP_S if _rt_healthy else POLL_DEGRADED_S)
         _wake.clear()
 
