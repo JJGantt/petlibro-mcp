@@ -12,7 +12,7 @@ everything talks directly to the feeder on the LAN via tinytuya using its device
   enqueues and the Pi dispenses), and mirror feeder state into Supabase `device_status`
   (device='cat-feeder') for the hub tile.
 
-Config (device id/key/ip + Supabase service key) lives in `.env-petlibro` (gitignored). The IP line
+Config (device id/key/ip, Supabase URL + service key) lives in `.env-petlibro` (gitignored). The IP line
 is rewritten in place when the feeder moves, so that file is state as well as config.
 
 Confirmed datapoints: dp232=manual feed (portions, write), dp247=last-feed log, dp233=motor,

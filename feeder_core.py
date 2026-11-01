@@ -30,7 +30,7 @@ LOCAL_KEY = os.environ["FEEDER_LOCAL_KEY"]
 FEEDER_IP = os.environ["FEEDER_IP"]
 VERSION = float(os.environ.get("FEEDER_VERSION", "3.4"))
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://<project-ref>.supabase.co").rstrip("/")
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 DP_FEED = "232"
