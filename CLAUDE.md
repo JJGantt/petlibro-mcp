@@ -37,7 +37,8 @@ quota, for worse latency. If a tap feels slow, fix the subscription rather than 
 
 It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit. A failed or
 unconfirmed feed and any loop error go to the ops responder (health/responder) through
-`ops_report.py`, a copy of that repo's reporter (edit it there), and the loop beats there each pass.
+the `ops-report` package (github.com/JJGantt/ops-report, pinned to a tag in `requirements.txt`, which
+the Pi's `.venv` is installed from), and the loop beats there each pass.
 
 ## A rejected local key cannot be refreshed from here right now
 
