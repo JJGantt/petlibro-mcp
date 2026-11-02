@@ -21,7 +21,7 @@ completes, so an immediate re-read looks like nothing happened.
 
 ## DHCP moves the feeder, and it fails silently
 
-A lease shift once broke every LAN call for days with no error anywhere. `rediscover()` UDP-scans for
+A lease shift breaks every LAN call with no error anywhere. `rediscover()` UDP-scans for
 the device id and writes the new address back into `.env-petlibro` so the next process starts
 correct. It is rate-limited by `SCAN_COOLDOWN_S` deliberately — an unplugged feeder must not add a
 scan to every call. Keep both properties if you touch it.
@@ -32,7 +32,7 @@ device id, local key and Supabase service key.
 ## The collector is realtime-driven
 
 `collector.py` wakes on a Supabase realtime INSERT on `feeder_commands`; its poll is only a
-missed-event backstop. The old 5s poll cost ~17k empty reads a day against the free-plan egress
+missed-event backstop. A 5s poll would cost ~17k empty reads a day against the free-plan egress
 quota, for worse latency. If a tap feels slow, fix the subscription rather than shortening the poll.
 
 It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit. A failed or
