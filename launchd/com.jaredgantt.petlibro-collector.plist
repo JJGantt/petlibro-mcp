@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.jaredgantt.petlibro-collector</string>
+  <!-- The Mac's fallback for the Pi's petlibro-collector: dispenses a feed command the Pi has not
+       claimed within FEED_DEFER_S. Install: cp to ~/Library/LaunchAgents, then
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jaredgantt.petlibro-collector.plist -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jaredgantt/repos/petlibro-mcp/.venv/bin/python</string>
+    <string>/Users/jaredgantt/repos/petlibro-mcp/collector.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/jaredgantt/repos/petlibro-mcp</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COLLECTOR_MACHINE</key><string>mac</string>
+    <key>FEED_DEFER_S</key><string>5</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/jaredgantt/Library/Logs/petlibro-collector.log</string>
+  <key>StandardErrorPath</key><string>/Users/jaredgantt/Library/Logs/petlibro-collector.log</string>
+</dict>
+</plist>

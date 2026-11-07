@@ -236,13 +236,19 @@ def _sb(method: str, path: str, body=None, extra_headers=None):
 
 
 def fetch_pending_commands() -> list:
-    """Pending feeder_commands rows (oldest first). Empty list without a key or on error."""
+    """Unclaimed pending feeder_commands rows (oldest first). Empty list without a key; raises on a
+    transport error so the collector's loop reports it."""
     if not SUPABASE_KEY:
         return []
-    try:
-        return _sb("GET", "feeder_commands?status=eq.pending&order=created_at.asc&select=*") or []
-    except Exception:
-        return []
+    return _sb("GET", "feeder_commands?status=eq.pending&claimed_by=is.null&order=created_at.asc&select=*") or []
+
+
+def claim_command(cmd_id: str, by: str) -> bool:
+    """Take a pending row before dispensing it. Only one caller's PATCH matches `claimed_by=is.null`, so
+    the Pi's collector and the Mac's fallback never both feed the same command."""
+    rows = _sb("PATCH", f"feeder_commands?id=eq.{cmd_id}&status=eq.pending&claimed_by=is.null",
+               {"claimed_by": by}, {"Prefer": "return=representation"})
+    return bool(rows)
 
 
 def mark_command(cmd_id: str, status: str, result: str = "") -> None:
@@ -251,7 +257,4 @@ def mark_command(cmd_id: str, status: str, result: str = "") -> None:
         return
     body = {"status": status, "result": result[:500],
             "executed_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
-    try:
-        _sb("PATCH", f"feeder_commands?id=eq.{cmd_id}", body)
-    except Exception:
-        pass
+    _sb("PATCH", f"feeder_commands?id=eq.{cmd_id}", body)

@@ -35,6 +35,18 @@ device id, local key and Supabase service key.
 missed-event backstop. A 5s poll would cost ~17k empty reads a day against the free-plan egress
 quota, for worse latency. If a tap feels slow, fix the subscription rather than shortening the poll.
 
+## Two collectors, one dispense
+
+The Pi's collector is the primary; the Mac runs the same script as its fallback (`FEED_DEFER_S` set in
+its launchd plist, `COLLECTOR_MACHINE=mac`). Every command is **claimed** (`claimed_by`, a PATCH that
+only one caller can win) before it is dispensed, and the fallback leaves a command alone until it is
+`FEED_DEFER_S` old, so while the Pi is up the Mac finds every row taken. A row the Mac wins is reported
+as an error, because it means the Pi is not answering. Dispensing without the claim, or a second
+collector without the defer, is a double feed. A command older than `MAX_AGE_S` is failed instead of
+dispensed, so a feed queued while both are down never lands hours later on top of the next one. A
+restart of the Pi's unit is needed after pulling a collector change (`sudo systemctl restart
+petlibro-collector`); launchd `kickstart -k` for the Mac's.
+
 It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit. A failed or
 unconfirmed feed and any loop error go to the ops responder (health/responder) through
 the `ops-report` package (github.com/JJGantt/ops-report, pinned to a tag in `requirements.txt`, which

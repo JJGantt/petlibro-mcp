@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PetLibro feeder collector — runs always-on on the Pi (the LAN host).
+"""PetLibro feeder collector — runs always-on on the Pi, and on the Mac as its fallback.
 
 Two jobs in one loop:
   1. Execute pending feed commands from Supabase `feeder_commands` (the web "Feed Now" relay — the
@@ -9,13 +9,21 @@ Two jobs in one loop:
      [] — a real chunk of the free-plan egress quota — for worse latency than realtime gives.)
   2. Mirror feeder state into `device_status` (device='cat-feeder') so the hub tile stays current.
      Done on startup, after any feed, and every MIRROR_EVERY_S.
+
+The Pi is the primary. The Mac runs the same script with FEED_DEFER_S set: it leaves a command alone
+until it is that old, so while the Pi is up the Pi has always claimed it first. A command the Mac does
+claim means the Pi is not answering, which it reports as an error. The fallback mirrors only after a
+feed of its own, so the Pi stays the one writer of the routine mirror.
 """
 
 import asyncio
 import json
 import logging
+import os
+import socket
 import threading
 import time
+from datetime import datetime, timezone
 
 import feeder_core as fc
 import ops_report as ops
@@ -23,6 +31,13 @@ import ops_report as ops
 POLL_BACKSTOP_S = 60   # realtime subscribed — poll is just a missed-event safety net
 POLL_DEGRADED_S = 5    # realtime down — polling is the pickup path, keep the old prompt cadence
 MIRROR_EVERY_S = 120   # routine state mirror period
+# A command this old is not dispensed: a feed asked for while every collector was down must not land
+# hours later on top of the next one.
+MAX_AGE_S = 600
+
+MACHINE = os.environ.get("COLLECTOR_MACHINE", "pi")
+FEED_DEFER_S = float(os.environ.get("FEED_DEFER_S", "0"))   # >0 makes this the fallback
+CLAIMANT = f"{MACHINE}:{socket.gethostname()}"
 
 _wake = threading.Event()
 _rt_healthy = False
@@ -71,12 +86,26 @@ def _rt_thread() -> None:
     asyncio.run(_serve())
 
 
+def _age_s(c: dict) -> float:
+    created = datetime.fromisoformat(str(c["created_at"]).replace("Z", "+00:00"))
+    return (datetime.now(timezone.utc) - created).total_seconds()
+
+
 def process_commands() -> bool:
-    """Execute any pending feed commands. Returns True if at least one was handled."""
-    cmds = fc.fetch_pending_commands()
-    if not cmds:
-        return False
-    for c in cmds:
+    """Claim and execute pending feed commands. Returns True if this collector fed at least once."""
+    fed = False
+    for c in fc.fetch_pending_commands():
+        age = _age_s(c)
+        if age < FEED_DEFER_S:
+            continue   # the Pi's to take; the next pass looks again
+        if not fc.claim_command(c["id"], CLAIMANT):
+            continue   # another collector has it
+        if age > MAX_AGE_S:
+            fc.mark_command(c["id"], "failed", f"expired: {int(age)}s old when claimed")
+            ops.report(f"feed command {c['id']} expired unanswered after {int(age)}s; not dispensed")
+            continue
+        if FEED_DEFER_S:
+            ops.report(f"feed command {c['id']} unclaimed after {int(age)}s: dispensing from the {MACHINE}, the Pi is not")
         if c.get("action") != "feed":
             fc.mark_command(c["id"], "failed", f"unknown action {c.get('action')!r}")
             continue
@@ -86,6 +115,7 @@ def process_commands() -> bool:
             res = fc.feed(portions)
             status = "done" if res.get("confirmed") else "failed"
             fc.mark_command(c["id"], status, json.dumps(res))
+            fed = True
             print(f"[collector] fed {portions} via command {c['id']} -> {status}", flush=True)
             if status == "failed":
                 ops.report(f"feed not confirmed by the feeder: {json.dumps(res)[:300]}")
@@ -93,13 +123,13 @@ def process_commands() -> bool:
             fc.mark_command(c["id"], "failed", str(e))
             print(f"[collector] feed command {c['id']} error: {e}", flush=True)
             ops.report(e)
-    return True
+    return fed
 
 
 def main():
     # Errors and the heartbeat go to the ops responder (health/responder); the beat is from this loop,
     # which comes round at least every POLL_BACKSTOP_S, so a wedged loop goes quiet.
-    ops.install(machine="pi", service="petlibro-collector")
+    ops.install(machine=MACHINE, service="petlibro-collector")
     # The realtime lib logs every socket drop (e.g. 1006 from Supabase) at ERROR and then reconnects
     # on its own (auto_reconnect=True); a dropped socket that recovers is not a fault, and while it is
     # down the main loop polls at POLL_DEGRADED_S. Reconnect failures still surface as other records.
@@ -110,14 +140,16 @@ def main():
     while True:
         try:
             fed = process_commands()
-            if fed or time.monotonic() - last_mirror >= MIRROR_EVERY_S:
+            routine = not FEED_DEFER_S and time.monotonic() - last_mirror >= MIRROR_EVERY_S
+            if fed or routine:
                 fc.mirror_to_supabase()
                 last_mirror = time.monotonic()
         except Exception as e:  # noqa: BLE001 — never let the loop die
             print(f"[collector] error: {e}", flush=True)
             ops.report(e)
         ops.beat(POLL_BACKSTOP_S)
-        _wake.wait(POLL_BACKSTOP_S if _rt_healthy else POLL_DEGRADED_S)
+        if _wake.wait(POLL_BACKSTOP_S if _rt_healthy else POLL_DEGRADED_S) and FEED_DEFER_S:
+            time.sleep(FEED_DEFER_S)   # give the Pi its head start on the command that woke us
         _wake.clear()
 
 
