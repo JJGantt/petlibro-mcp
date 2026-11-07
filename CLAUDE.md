@@ -7,8 +7,8 @@ datapoint and all feeder state exist only on the local channel. So control is ti
 the feeder over the LAN, with the device id + local key.
 
 The consequence to keep in mind: whatever runs this has to be on the feeder's network. The Fly hub
-cannot be, which is why "Feed Now" on the phone writes a `feeder_commands` row and the Pi's
-`collector.py` dispenses. Nothing here should try to reach the feeder from off-LAN.
+cannot be, which is why "Feed Now" on the phone and the data MCP's `feed_cats` write a
+`feeder_commands` row and `collector.py` on the Pi (or the Mac, its fallback) dispenses. Nothing here should try to reach the feeder from off-LAN.
 
 It also means the PetLibro app working is not evidence that this does — the app goes via the cloud.
 
