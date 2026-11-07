@@ -38,6 +38,11 @@ class ProcessCommands(unittest.TestCase):
         self.assertEqual(self.marks, [("c1", "done")])
         self.assertEqual(self.reports, [])
 
+    def test_primary_reports_a_command_realtime_missed(self):
+        self.assertTrue(self.run_with([row(collector.LATE_S + 10)]))
+        self.feed.assert_called_once()
+        self.assertTrue(any("realtime missed it" in r for r in self.reports))
+
     def test_fallback_leaves_a_young_command_for_the_pi(self):
         self.assertFalse(self.run_with([row(2)], defer=8))
         self.feed.assert_not_called()

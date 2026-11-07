@@ -34,6 +34,10 @@ MIRROR_EVERY_S = 120   # routine state mirror period
 # A command this old is not dispensed: a feed asked for while every collector was down must not land
 # hours later on top of the next one.
 MAX_AGE_S = 600
+# The primary hears a command over realtime within a second or two. One it first sees this late was
+# found by the backstop poll, which means the subscription missed it: reported, since a deaf channel
+# looks healthy otherwise.
+LATE_S = 20
 
 MACHINE = os.environ.get("COLLECTOR_MACHINE", "pi")
 FEED_DEFER_S = float(os.environ.get("FEED_DEFER_S", "0"))   # >0 makes this the fallback
@@ -104,6 +108,8 @@ def process_commands() -> bool:
             fc.mark_command(c["id"], "failed", f"expired: {int(age)}s old when claimed")
             ops.report(f"feed command {c['id']} expired unanswered after {int(age)}s; not dispensed")
             continue
+        if not FEED_DEFER_S and age > LATE_S:
+            ops.report(f"feed command {c['id']} reached the collector {int(age)}s late: realtime missed it, the backstop poll found it")
         if FEED_DEFER_S:
             ops.report(f"feed command {c['id']} unclaimed after {int(age)}s: dispensing from the {MACHINE}, the Pi is not")
         if c.get("action") != "feed":

@@ -43,7 +43,9 @@ only one caller can win) before it is dispensed, and the fallback leaves a comma
 `FEED_DEFER_S` old, so while the Pi is up the Mac finds every row taken. A row the Mac wins is reported
 as an error, because it means the Pi is not answering. Dispensing without the claim, or a second
 collector without the defer, is a double feed. A command older than `MAX_AGE_S` is failed instead of
-dispensed, so a feed queued while both are down never lands hours later on top of the next one. A
+dispensed, so a feed queued while both are down never lands hours later on top of the next one. A command
+the Pi first sees more than `LATE_S` after it was written came by the backstop poll, not realtime, and
+is reported, since a deaf subscription otherwise looks healthy. A
 restart of the Pi's unit is needed after pulling a collector change (`sudo systemctl restart
 petlibro-collector`); launchd `kickstart -k` for the Mac's.
 
