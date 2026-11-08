@@ -30,6 +30,7 @@ import ops_report as ops
 
 POLL_BACKSTOP_S = 60   # realtime subscribed — poll is just a missed-event safety net
 POLL_DEGRADED_S = 5    # realtime down — polling is the pickup path, keep the old prompt cadence
+RT_UNJOINED_GRACE_S = 30  # a rejoin takes about a second; longer than this, the channel is dead
 MIRROR_EVERY_S = 120   # routine state mirror period
 # A command this old is not dispensed: a feed asked for while every collector was down must not land
 # hours later on top of the next one.
@@ -75,7 +76,20 @@ def _rt_thread() -> None:
                 ch.on_postgres_changes("INSERT", callback=lambda _p: _wake.set(),
                                        schema="public", table="feeder_commands")
                 await ch.subscribe(_on_sub)
+                # A connected socket is not a subscribed one. realtime-py's auto-reconnect rejoins only
+                # channels that were JOINED when the socket dropped, and with none it crashes in
+                # asyncio.wait([]), leaving a live socket carrying no subscription. So the channel's own
+                # state is watched too, and a channel left unjoined past the grace gets a fresh client.
+                unjoined_since = None
                 while sock.is_connected:
+                    if ch.is_joined:
+                        unjoined_since = None
+                    elif unjoined_since is None:
+                        unjoined_since = time.monotonic()
+                    elif time.monotonic() - unjoined_since > RT_UNJOINED_GRACE_S:
+                        ops.report(f"realtime channel unjoined for {RT_UNJOINED_GRACE_S}s on a connected "
+                                   f"socket (state {ch.state}); rebuilding the client")
+                        break
                     await asyncio.sleep(1.0)
             except Exception as e:  # noqa: BLE001
                 print(f"[collector] realtime error: {e}; retrying in 5s (poll fallback active)", flush=True)
@@ -141,6 +155,11 @@ def main():
     # down the main loop polls at POLL_DEGRADED_S. Reconnect failures still surface as other records.
     logging.getLogger("realtime._async.client").addFilter(
         lambda r: not r.getMessage().startswith("WebSocket connection closed with code"))
+    # That reconnect's asyncio.wait([]) crash surfaces only as asyncio's GC-time "Task exception was
+    # never retrieved". The unjoined-channel watch in _rt_thread reports the outage it causes, so this
+    # record would only report the same thing twice.
+    logging.getLogger("asyncio").addFilter(
+        lambda r: "Set of Tasks/Futures is empty" not in r.getMessage())
     threading.Thread(target=_rt_thread, daemon=True).start()
     last_mirror = 0.0   # monotonic epoch start → forces the startup mirror
     while True:

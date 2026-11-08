@@ -35,6 +35,12 @@ device id, local key and Supabase service key.
 missed-event backstop. A 5s poll would cost ~17k empty reads a day against the free-plan egress
 quota, for worse latency. If a tap feels slow, fix the subscription rather than shortening the poll.
 
+A connected socket does not mean a subscribed channel: realtime-py's auto-reconnect rejoins only channels
+that were JOINED at the drop, and with none it crashes (`asyncio.wait([])`, `Set of Tasks/Futures is
+empty`) and leaves a live socket with no subscription. `_rt_thread` therefore also watches `ch.is_joined`
+and rebuilds the client, with a report, once the channel has been unjoined `RT_UNJOINED_GRACE_S`. Watching
+`is_connected` alone is what lets it go deaf.
+
 ## Two collectors, one dispense
 
 The Pi's collector is the primary; the Mac runs the same script as its fallback (`FEED_DEFER_S` set in
