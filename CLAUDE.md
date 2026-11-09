@@ -15,9 +15,20 @@ It also means the PetLibro app working is not evidence that this does — the ap
 ## `dp 232` is the feed write, not `dp 3`
 
 The confirmed map is in `feeder_core.py`'s header and that file is the authority: 232 write =
-portions, 247 = last-feed log, 233 = motor state, 241 = food level, 231 = schedule (5 bytes per
+portions, 247 = last manual feed, 237 = last scheduled feed, 233 = motor state, 241 = food level, 231 = schedule (5 bytes per
 entry: day mask, hour, minute, portions, enabled). A feed cycle takes ~25s; 247 only updates when it
 completes, so an immediate re-read looks like nothing happened.
+
+## Feed history is ours to keep
+
+The feeder holds only its latest feed of each kind (237 scheduled, 247 manual) and overwrites it at the
+next one, so `feeder_feeds` is the only record of what was dispensed. The collector's listener thread
+keeps a second LAN connection open (heartbeat every `LISTEN_HEARTBEAT_S`; the feeder accepts it
+alongside the one `feed()` opens) and the feeder pushes each new log value on it; the routine mirror read
+offers the same values again as the backstop, and the table's unique (kind, fed_at) makes every repeat a
+no-op. So a dropped socket loses nothing unless two feeds of one kind land inside a single gap. A
+scheduled slot with no scheduled feed logged `MISSED_GRACE_S` after it is reported to the ops responder.
+Only the primary records and judges slots.
 
 ## DHCP moves the feeder, and it fails silently
 

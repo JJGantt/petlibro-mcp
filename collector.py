@@ -9,6 +9,11 @@ Two jobs in one loop:
      [] — a real chunk of the free-plan egress quota — for worse latency than realtime gives.)
   2. Mirror feeder state into `device_status` (device='cat-feeder') so the hub tile stays current.
      Done on startup, after any feed, and every MIRROR_EVERY_S.
+  3. Record every feed, scheduled and manual, into `feeder_feeds`. The feeder keeps only its latest
+     feed of each kind, so a listener thread holds a LAN connection open and the feeder pushes each
+     new log value as it is written; the mirror's read offers the same values again as the backstop
+     (the table dedupes on kind+fed_at). A scheduled slot that passes with no scheduled feed logged
+     within MISSED_GRACE_S is reported.
 
 The Pi is the primary. The Mac runs the same script with FEED_DEFER_S set: it leaves a command alone
 until it is that old, so while the Pi is up the Pi has always claimed it first. A command the Mac does
@@ -24,7 +29,7 @@ import socket
 import threading
 import time
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import feeder_core as fc
 import ops_report as ops
@@ -45,12 +50,22 @@ LATE_S = 20
 # straight; then it is reported once for the streak. Anything else is reported at once.
 LINK_RAISE_S = 300
 
+# The feed listener's connection: the feeder drops an idle local socket, so it is kept open with a
+# heartbeat; a dropped one is reopened with backoff up to LISTEN_BACKOFF_MAX_S.
+LISTEN_HEARTBEAT_S = 20
+LISTEN_BACKOFF_MAX_S = 300
+# A scheduled slot with no scheduled feed logged this long after it is reported as missed. A cycle
+# takes ~25s and dp 237 is stamped about 10s after the slot.
+MISSED_GRACE_S = 600
+
 MACHINE = os.environ.get("COLLECTOR_MACHINE", "pi")
 FEED_DEFER_S = float(os.environ.get("FEED_DEFER_S", "0"))   # >0 makes this the fallback
 CLAIMANT = f"{MACHINE}:{socket.gethostname()}"
 
 _wake = threading.Event()
 _rt_healthy = False
+_last_scheduled = 0       # epoch of the latest scheduled feed seen, from the listener or the mirror read
+_record_streak = None     # LinkStreak for feeder_feeds writes, made in main()
 
 
 def is_link_failure(e: BaseException) -> bool:
@@ -142,6 +157,82 @@ def _rt_thread() -> None:
     asyncio.run(_serve())
 
 
+def record(feeds: list) -> None:
+    """Offer feed log values to feeder_feeds. Duplicates are skipped by the table, and a failed write is
+    retried for free by the next offer of the same value (the feeder keeps it until the next feed)."""
+    global _last_scheduled
+    for f in feeds:
+        if f["kind"] == "scheduled":
+            _last_scheduled = max(_last_scheduled, f["fed_at"])
+    try:
+        for r in fc.record_feeds(feeds, CLAIMANT):
+            print(f"[collector] recorded {r['kind']} feed of {r['portions']} at {r['fed_at']}", flush=True)
+        if _record_streak:
+            _record_streak.ok()
+    except Exception as e:  # noqa: BLE001 — the next offer retries it
+        if _record_streak:
+            _record_streak.fail(e)
+
+
+def _feed_listener() -> None:
+    """Hold a LAN connection to the feeder and record each feed log value it pushes. Never raises out."""
+    streak = LinkStreak("feeder listener")
+    backoff = 5
+    while True:
+        d = None
+        try:
+            d = fc.device()
+            d.set_socketPersistent(True)
+            d.set_socketTimeout(LISTEN_HEARTBEAT_S)
+            first = d.status() or {}
+            if not first.get("dps"):
+                raise ConnectionError(f"feeder status failed: {str(first)[:200]}")
+            streak.ok()
+            backoff = 5
+            record(fc.feeds_in(first["dps"]))
+            last_hb = time.monotonic()
+            while True:
+                msg = d.receive()
+                if isinstance(msg, dict) and msg.get("Err"):
+                    raise ConnectionError(f"feeder connection dropped: {str(msg)[:200]}")
+                if isinstance(msg, dict) and msg.get("dps"):
+                    record(fc.feeds_in(msg["dps"]))
+                if time.monotonic() - last_hb >= LISTEN_HEARTBEAT_S:
+                    d.heartbeat(nowait=True)
+                    last_hb = time.monotonic()
+        except Exception as e:  # noqa: BLE001 — reconnect below; the mirror read backstops meanwhile
+            streak.fail(e)
+        finally:
+            try:
+                if d:
+                    d.close()
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(backoff)
+        backoff = min(backoff * 2, LISTEN_BACKOFF_MAX_S)
+
+
+def missed_slot(schedule: list, last_scheduled: float, since: datetime, now: datetime) -> datetime | None:
+    """The latest enabled schedule slot that is more than MISSED_GRACE_S past, no earlier than `since`,
+    with no scheduled feed logged at or after it — or None. Times are local wall clock, as the feeder
+    keeps them; `since` and `now` are naive local datetimes."""
+    latest = None
+    for e in schedule:
+        if not e.get("enabled"):
+            continue
+        for back in range(2):   # today's slot, or yesterday's for a slot later in the day than now
+            slot = (now - timedelta(days=back)).replace(hour=e["hour"], minute=e["minute"], second=0,
+                                                        microsecond=0)
+            if not (e.get("mask", 0x7F) >> slot.weekday() & 1):
+                continue
+            if (now - slot).total_seconds() > MISSED_GRACE_S and slot >= since:
+                latest = max(latest, slot) if latest else slot
+                break
+    if latest is None:
+        return None
+    return None if last_scheduled >= latest.timestamp() - 60 else latest
+
+
 def _age_s(c: dict) -> float:
     created = datetime.fromisoformat(str(c["created_at"]).replace("Z", "+00:00"))
     return (datetime.now(timezone.utc) - created).total_seconds()
@@ -208,7 +299,14 @@ def main():
     # record would only report the same thing twice.
     logging.getLogger("asyncio").addFilter(
         lambda r: "Set of Tasks/Futures is empty" not in r.getMessage())
+    global _record_streak
+    _record_streak = LinkStreak("feed record")
     threading.Thread(target=_rt_thread, daemon=True).start()
+    if not FEED_DEFER_S:   # the primary records feeds; the fallback's own feeds land via its mirror
+        threading.Thread(target=_feed_listener, daemon=True).start()
+    started = datetime.now()
+    schedule: list = []
+    reported_missed = None
     last_mirror = 0.0   # monotonic epoch start → forces the startup mirror
     loop = LinkStreak("loop")
     while True:
@@ -216,8 +314,18 @@ def main():
             fed = process_commands()
             routine = not FEED_DEFER_S and time.monotonic() - last_mirror >= MIRROR_EVERY_S
             if fed or routine:
-                fc.mirror_to_supabase()
+                snap = fc.snapshot()
+                fc.mirror_to_supabase(snap)
                 last_mirror = time.monotonic()
+                if snap.get("online"):
+                    schedule = snap.get("schedule", [])
+                    record(snap.get("feeds", []))
+            if not FEED_DEFER_S:
+                slot = missed_slot(schedule, _last_scheduled, started, datetime.now())
+                if slot and slot != reported_missed:
+                    reported_missed = slot
+                    ops.report(f"scheduled feed at {slot:%Y-%m-%d %H:%M} not logged by the feeder "
+                               f"{MISSED_GRACE_S // 60} min later")
             loop.ok()
         except Exception as e:  # noqa: BLE001 — never let the loop die
             loop.fail(e)

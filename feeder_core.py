@@ -9,7 +9,9 @@ Confirmed datapoint map (tinytuya.Device(..., version=3.4)):
   * dp 232 (write) — manual feed, integer = portions. The device ACKs it (echoes 233='feeding')
                      and resets it to 0 between feeds, so repeat same-count feeds work (no dedupe).
                      Cycle takes ~25s; the feed log (247) updates when it completes.
-  * dp 247 (read)  — last-feed log JSON {"value": portions, "time": epoch}
+  * dp 247 (read)  — last MANUAL feed JSON {"value": portions, "time": epoch}
+  * dp 237 (read)  — last SCHEDULED feed, same JSON. Each holds only the latest of its kind, so the
+                     history lives in Supabase `feeder_feeds`, written by the collector.
   * dp 233 (read)  — motor state: "standby" / "feeding"
   * dp 241 (read)  — food bin level (e.g. "full")
   * dp 231 (read)  — feeding schedule, raw hex; 5 bytes/entry: [day_mask, hour, min, portions, enabled]
@@ -35,6 +37,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 DP_FEED = "232"
 DP_LAST_FEED = "247"
+DP_LAST_SCHEDULED = "237"
 DP_MOTOR = "233"
 DP_FOOD = "241"
 DP_SCHEDULE = "231"
@@ -110,14 +113,37 @@ def read_dps() -> dict:
     return {}
 
 
-def parse_last_feed(dps: dict) -> dict:
-    raw = dps.get(DP_LAST_FEED)
+def parse_last_feed(dps: dict, dp: str = DP_LAST_FEED) -> dict:
+    raw = dps.get(dp)
     if not raw:
         return {}
     try:
         return json.loads(raw)
     except (ValueError, TypeError):
         return {}
+
+
+def feeds_in(dps: dict) -> list:
+    """The feed records carried in a dps dict (a full status or a pushed update):
+    [{kind, portions, fed_at}], fed_at in epoch seconds. Empty when neither log is present."""
+    out = []
+    for kind, dp in (("scheduled", DP_LAST_SCHEDULED), ("manual", DP_LAST_FEED)):
+        log = parse_last_feed(dps, dp)
+        if log.get("time"):
+            out.append({"kind": kind, "portions": int(log.get("value") or 0), "fed_at": int(log["time"])})
+    return out
+
+
+def record_feeds(feeds: list, by: str) -> list:
+    """Insert feed records into `feeder_feeds`, skipping ones already there (unique kind+fed_at), so
+    the same log value can be offered any number of times. Returns the rows newly inserted. Raises on
+    a transport error."""
+    if not feeds or not SUPABASE_KEY:
+        return []
+    rows = [{"kind": f["kind"], "portions": f["portions"], "recorded_by": by,
+             "fed_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(f["fed_at"]))} for f in feeds]
+    return _sb("POST", "feeder_feeds?on_conflict=kind,fed_at", rows,
+               {"Prefer": "resolution=ignore-duplicates,return=representation"}) or []
 
 
 def decode_schedule(dps: dict) -> list:
@@ -133,7 +159,7 @@ def decode_schedule(dps: dict) -> list:
     for i in range(0, len(b) - 4, 5):
         mask, hour, minute, portions, enabled = b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4]
         days = "every day" if mask == 0x7F else ",".join(d for j, d in enumerate(_DAYS) if mask >> j & 1)
-        out.append({"time": f"{hour:02d}:{minute:02d}", "hour": hour, "minute": minute,
+        out.append({"time": f"{hour:02d}:{minute:02d}", "hour": hour, "minute": minute, "mask": mask,
                     "portions": portions, "days": days, "enabled": bool(enabled)})
     return sorted(out, key=lambda e: (e["hour"], e["minute"]))
 
@@ -184,6 +210,7 @@ def snapshot() -> dict:
         "last_fed_at": last.get("time"),
         "last_fed_portions": last.get("value"),
         "schedule": decode_schedule(dps),
+        "feeds": feeds_in(dps),
     }
 
 
