@@ -76,3 +76,58 @@ class ProcessCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinkFailures(unittest.TestCase):
+    """A link failure (DNS, refused, reset, 5xx: every Mac wake starts with some) is reported only once it
+    has lasted LINK_RAISE_S, once per streak; anything else is reported at once; ok() ends a streak."""
+
+    def setUp(self):
+        self.reports, self.now = [], [1000.0]
+        for p in (mock.patch.object(collector.ops, "report", lambda m, **k: self.reports.append(str(m))),
+                  mock.patch.object(collector.time, "monotonic", lambda: self.now[0])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def gai(self):
+        import socket, urllib.error
+        return urllib.error.URLError(socket.gaierror(8, "nodename nor servname provided"))
+
+    def test_link_failure_reports_once_after_the_streak_is_long(self):
+        s = collector.LinkStreak("loop")
+        s.fail(self.gai())
+        self.now[0] += 299
+        s.fail(self.gai())
+        self.assertEqual(self.reports, [])
+        self.now[0] += 2
+        s.fail(self.gai())
+        self.now[0] += 60
+        s.fail(self.gai())
+        self.assertEqual(len(self.reports), 1)
+
+    def test_ok_ends_the_streak(self):
+        s = collector.LinkStreak("loop")
+        s.fail(self.gai())
+        self.now[0] += 200
+        s.ok()
+        self.now[0] += 200
+        s.fail(self.gai())
+        self.assertEqual(self.reports, [])
+
+    def test_other_failures_report_at_once(self):
+        import io, urllib.error
+        s = collector.LinkStreak("loop")
+        s.fail(ValueError("bad row"))
+        s.fail(urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO()))
+        self.assertEqual(len(self.reports), 2)
+        s.fail(urllib.error.HTTPError("u", 502, "Bad Gateway", {}, io.BytesIO()))
+        self.assertEqual(len(self.reports), 2)
+
+    def test_realtime_retry_and_give_up_records_are_warnings(self):
+        import logging
+        for msg, level in [("Connection attempt failed: x", logging.WARNING),
+                           ("Connection failed permanently after 5 attempts. Error: x", logging.WARNING),
+                           ("something else", logging.ERROR)]:
+            r = logging.LogRecord("realtime._async.client", logging.ERROR, "", 0, msg, None, None)
+            collector._demote_connect_retry(r)
+            self.assertEqual(r.levelno, level, msg)

@@ -23,6 +23,7 @@ import os
 import socket
 import threading
 import time
+import urllib.error
 from datetime import datetime, timezone
 
 import feeder_core as fc
@@ -39,6 +40,10 @@ MAX_AGE_S = 600
 # found by the backstop poll, which means the subscription missed it: reported, since a deaf channel
 # looks healthy otherwise.
 LATE_S = 20
+# Every Mac wake starts with a few seconds of failed lookups and connects, and the loop retries on its
+# own, so a link failure (DNS, refused, reset, timeout, 5xx) is a warning until it has lasted this long
+# straight; then it is reported once for the streak. Anything else is reported at once.
+LINK_RAISE_S = 300
 
 MACHINE = os.environ.get("COLLECTOR_MACHINE", "pi")
 FEED_DEFER_S = float(os.environ.get("FEED_DEFER_S", "0"))   # >0 makes this the fallback
@@ -46,6 +51,35 @@ CLAIMANT = f"{MACHINE}:{socket.gethostname()}"
 
 _wake = threading.Event()
 _rt_healthy = False
+
+
+def is_link_failure(e: BaseException) -> bool:
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code >= 500
+    return isinstance(e, OSError)   # URLError, socket.gaierror, ConnectionError, TimeoutError
+
+
+class LinkStreak:
+    """Report a run of link failures once, after LINK_RAISE_S; other failures at once. ok() ends a run."""
+
+    def __init__(self, label: str):
+        self.label, self.since, self.raised = label, 0.0, False
+
+    def ok(self) -> None:
+        self.since, self.raised = 0.0, False
+
+    def fail(self, e: BaseException) -> None:
+        if not is_link_failure(e):
+            print(f"[collector] {self.label} error: {e}", flush=True)
+            ops.report(e)
+            return
+        now = time.monotonic()
+        self.since = self.since or now
+        if not self.raised and now - self.since >= LINK_RAISE_S:
+            self.raised = True
+            ops.report(f"{self.label} failing for {int(now - self.since)}s: {e}")
+        else:
+            print(f"[collector] {self.label} failed (will retry): {e}", flush=True)
 
 
 def _rt_thread() -> None:
@@ -59,9 +93,13 @@ def _rt_thread() -> None:
         print(f"[collector] realtime unavailable ({e}); polling every {POLL_DEGRADED_S}s", flush=True)
         return
 
+    streak = LinkStreak("realtime connect")
+
     def _on_sub(state, err=None) -> None:
         global _rt_healthy
         _rt_healthy = "SUBSCRIBED" in str(state).upper()
+        if _rt_healthy:
+            streak.ok()
         print(f"[collector] realtime subscription: {state}{(' err=' + str(err)) if err else ''}", flush=True)
 
     async def _serve() -> None:
@@ -91,8 +129,8 @@ def _rt_thread() -> None:
                                    f"socket (state {ch.state}); rebuilding the client")
                         break
                     await asyncio.sleep(1.0)
-            except Exception as e:  # noqa: BLE001
-                print(f"[collector] realtime error: {e}; retrying in 5s (poll fallback active)", flush=True)
+            except Exception as e:  # noqa: BLE001 — poll fallback is active meanwhile; retried in 5s
+                streak.fail(e)
             _rt_healthy = False
             try:
                 if sock:
@@ -146,6 +184,13 @@ def process_commands() -> bool:
     return fed
 
 
+def _demote_connect_retry(record: logging.LogRecord) -> bool:
+    if record.levelno >= logging.ERROR and record.getMessage().startswith(
+            ("Connection attempt failed:", "Connection failed permanently after")):
+        record.levelno, record.levelname = logging.WARNING, "WARNING"
+    return True
+
+
 def main():
     # Errors and the heartbeat go to the ops responder (health/responder); the beat is from this loop,
     # which comes round at least every POLL_BACKSTOP_S, so a wedged loop goes quiet.
@@ -155,6 +200,9 @@ def main():
     # down the main loop polls at POLL_DEGRADED_S. Reconnect failures still surface as other records.
     logging.getLogger("realtime._async.client").addFilter(
         lambda r: not r.getMessage().startswith("WebSocket connection closed with code"))
+    # Its per-attempt "Connection attempt failed" and its "Connection failed permanently" are re-levelled
+    # to WARNING: connect() re-raises the failure to _serve, whose LinkStreak reports one that lasts.
+    logging.getLogger("realtime._async.client").addFilter(_demote_connect_retry)
     # That reconnect's asyncio.wait([]) crash surfaces only as asyncio's GC-time "Task exception was
     # never retrieved". The unjoined-channel watch in _rt_thread reports the outage it causes, so this
     # record would only report the same thing twice.
@@ -162,6 +210,7 @@ def main():
         lambda r: "Set of Tasks/Futures is empty" not in r.getMessage())
     threading.Thread(target=_rt_thread, daemon=True).start()
     last_mirror = 0.0   # monotonic epoch start → forces the startup mirror
+    loop = LinkStreak("loop")
     while True:
         try:
             fed = process_commands()
@@ -169,9 +218,9 @@ def main():
             if fed or routine:
                 fc.mirror_to_supabase()
                 last_mirror = time.monotonic()
+            loop.ok()
         except Exception as e:  # noqa: BLE001 — never let the loop die
-            print(f"[collector] error: {e}", flush=True)
-            ops.report(e)
+            loop.fail(e)
         ops.beat(POLL_BACKSTOP_S)
         if _wake.wait(POLL_BACKSTOP_S if _rt_healthy else POLL_DEGRADED_S) and FEED_DEFER_S:
             time.sleep(FEED_DEFER_S)   # give the Pi its head start on the command that woke us

@@ -58,7 +58,11 @@ petlibro-collector`); launchd `kickstart -k` for the Mac's.
 It runs as `petlibro-collector.service` on the Pi, and `pi-ops` watches that unit. A failed or
 unconfirmed feed and any loop error go to the ops responder (health/responder) through
 the `ops-report` package (github.com/JJGantt/ops-report, pinned to a tag in `requirements.txt`, which
-the Pi's `.venv` is installed from), and the loop beats there each pass.
+the Pi's `.venv` is installed from), and the loop beats there each pass. A link failure (DNS,
+refused, reset, timeout, 5xx), in the loop or the realtime connect, is only reported once it has lasted
+`LINK_RAISE_S` (5 min) straight (`LinkStreak`), because every Mac wake starts with a few and the loop
+retries by itself; realtime-py's own connect-retry and give-up records are re-levelled to WARNING for the
+same reason. Any other failure is reported at once.
 
 ## A rejected local key cannot be refreshed from here right now
 
