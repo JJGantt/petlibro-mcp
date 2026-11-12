@@ -75,7 +75,8 @@ def is_link_failure(e: BaseException) -> bool:
 
 
 class LinkStreak:
-    """Report a run of link failures once, after LINK_RAISE_S; other failures at once. ok() ends a run."""
+    """Each link failure is an occurrence; a run of them is reported once as an error, after
+    LINK_RAISE_S; other failures at once. ok() ends a run."""
 
     def __init__(self, label: str):
         self.label, self.since, self.raised = label, 0.0, False
@@ -95,6 +96,7 @@ class LinkStreak:
             ops.report(f"{self.label} failing for {int(now - self.since)}s: {e}")
         else:
             print(f"[collector] {self.label} failed (will retry): {e}", flush=True)
+            ops.occurrence(f"{self.label} failed (will retry): {e}")
 
 
 def _rt_thread() -> None:
@@ -277,7 +279,14 @@ def process_commands() -> bool:
 
 def _demote_connect_retry(record: logging.LogRecord) -> bool:
     if record.levelno >= logging.ERROR and record.getMessage().startswith(
-            ("Connection attempt failed:", "Connection failed permanently after")):
+            ("Connection attempt failed:", "Connection failed permanently after",
+             "WebSocket connection closed with code")):
+        record.levelno, record.levelname = logging.WARNING, "WARNING"
+    return True
+
+
+def _demote_empty_wait(record: logging.LogRecord) -> bool:
+    if record.levelno >= logging.ERROR and "Set of Tasks/Futures is empty" in record.getMessage():
         record.levelno, record.levelname = logging.WARNING, "WARNING"
     return True
 
@@ -286,19 +295,16 @@ def main():
     # Errors and the heartbeat go to the ops responder (health/responder); the beat is from this loop,
     # which comes round at least every POLL_BACKSTOP_S, so a wedged loop goes quiet.
     ops.install(machine=MACHINE, service="petlibro-collector")
-    # The realtime lib logs every socket drop (e.g. 1006 from Supabase) at ERROR and then reconnects
-    # on its own (auto_reconnect=True); a dropped socket that recovers is not a fault, and while it is
-    # down the main loop polls at POLL_DEGRADED_S. Reconnect failures still surface as other records.
-    logging.getLogger("realtime._async.client").addFilter(
-        lambda r: not r.getMessage().startswith("WebSocket connection closed with code"))
-    # Its per-attempt "Connection attempt failed" and its "Connection failed permanently" are re-levelled
-    # to WARNING: connect() re-raises the failure to _serve, whose LinkStreak reports one that lasts.
+    # The realtime lib logs every socket drop (e.g. 1006 from Supabase), each failed connect attempt and
+    # "Connection failed permanently" at ERROR, then reconnects on its own (auto_reconnect=True). They are
+    # re-levelled to WARNING, which the reporter sends as occurrences: counted against their watch, never
+    # an incident one at a time. connect() re-raises a lasting failure to _serve, whose LinkStreak
+    # reports it as an error.
     logging.getLogger("realtime._async.client").addFilter(_demote_connect_retry)
     # That reconnect's asyncio.wait([]) crash surfaces only as asyncio's GC-time "Task exception was
-    # never retrieved". The unjoined-channel watch in _rt_thread reports the outage it causes, so this
-    # record would only report the same thing twice.
-    logging.getLogger("asyncio").addFilter(
-        lambda r: "Set of Tasks/Futures is empty" not in r.getMessage())
+    # never retrieved". The unjoined-channel watch in _rt_thread reports the outage it causes as an
+    # error, so this record is an occurrence of it.
+    logging.getLogger("asyncio").addFilter(_demote_empty_wait)
     global _record_streak
     _record_streak = LinkStreak("feed record")
     threading.Thread(target=_rt_thread, daemon=True).start()

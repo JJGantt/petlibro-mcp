@@ -3,4 +3,4 @@ python-dotenv>=1.0
 realtime==2.31.0
 # petlibro_mcp.py uses mcp.server.fastmcp, which mcp 2.x removed.
 mcp<2
-ops-report @ https://github.com/JJGantt/ops-report/archive/refs/tags/v1.0.0.tar.gz
+ops-report @ https://github.com/JJGantt/ops-report/archive/refs/tags/v1.1.0.tar.gz
